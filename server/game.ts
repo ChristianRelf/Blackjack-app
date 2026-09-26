@@ -90,8 +90,22 @@ export function upsertPlayer(room: InternalRoom, profile: { id: string; name: st
 }
 
 export function disconnectPlayer(room: InternalRoom, id: string) {
-  const player = room.players.find((item) => item.id === id);
-  if (player) player.connected = false;
+  const index = room.players.findIndex((item) => item.id === id);
+  const player = room.players[index];
+  if (!player || player.isBot) return undefined;
+  if (room.phase === 'betting') {
+    player.chips += player.bet;
+    player.bet = 0;
+    room.players.splice(index, 1);
+    return player;
+  }
+  if (room.phase === 'settled') {
+    room.players.splice(index, 1);
+    return player;
+  }
+  player.connected = false;
+  if (player.status === 'playing') player.status = 'stood';
+  return undefined;
 }
 
 export function placeBet(room: InternalRoom, id: string, amount: number) {
@@ -162,9 +176,13 @@ export function playerAction(room: InternalRoom, id: string, action: 'hit' | 'st
 
 export function playBots(room: InternalRoom) {
   for (const bot of room.players.filter((player) => player.isBot && player.status === 'playing')) {
-    const value = scoreHand(bot.hand).total;
-    if (value < 16 || (value === 16 && Math.random() > 0.55)) playerAction(room, bot.id, 'hit');
-    else playerAction(room, bot.id, 'stand');
+    let safety = 0;
+    while (bot.status === 'playing' && safety < 8) {
+      const value = scoreHand(bot.hand).total;
+      if (value < 16 || (value === 16 && Math.random() > 0.55)) playerAction(room, bot.id, 'hit');
+      else playerAction(room, bot.id, 'stand');
+      safety += 1;
+    }
   }
 }
 
@@ -219,6 +237,7 @@ export function resetRound(room: InternalRoom) {
   room.phase = 'betting';
   room.secondsLeft = 24;
   room.dealer = { hand: [], score: 0, confidence: 94, thought: 'Waiting for wagers · S17 policy ready' };
+  room.players = room.players.filter((player) => player.isBot || player.connected);
   for (const player of room.players) {
     player.hand = [];
     player.bet = 0;

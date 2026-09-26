@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import cors from 'cors';
 import express from 'express';
 import session from 'express-session';
+import sessionFileStore from 'session-file-store';
 import { Server } from 'socket.io';
 import { addChat, beginRound, clearBet, createRoom, dealerStep, disconnectPlayer, placeBet, playBots, playerAction, publicRoom, resetRound, settleRound, shouldPlayDealer, upsertPlayer } from './game.js';
 import { getProfile, saveProfile, type StoredProfile } from './store.js';
@@ -23,11 +24,15 @@ const server = createServer(app);
 const port = Number(process.env.PORT ?? 3001);
 const clientOrigin = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173';
 const isProduction = existsSync(join(process.cwd(), 'dist', 'index.html')) && process.env.NODE_ENV === 'production';
+const FileStore = sessionFileStore(session);
+const secureCookies = process.env.COOKIE_SECURE === 'true';
+if (secureCookies) app.set('trust proxy', 1);
 const sessionMiddleware = session({
+  store: new FileStore({ path: join(process.cwd(), 'server', 'data', 'sessions'), ttl: 60 * 60 * 24 * 30, retries: 0 }),
   secret: process.env.SESSION_SECRET ?? 'afterdark-local-development-secret',
   resave: false,
   saveUninitialized: true,
-  cookie: { httpOnly: true, sameSite: 'lax', secure: false, maxAge: 1000 * 60 * 60 * 24 * 30 },
+  cookie: { httpOnly: true, sameSite: 'lax', secure: secureCookies, maxAge: 1000 * 60 * 60 * 24 * 30 },
 });
 
 app.use(cors({ origin: clientOrigin, credentials: true }));
@@ -40,6 +45,14 @@ function sessionProfile(req: express.Request) {
     const suffix = Math.floor(1000 + Math.random() * 8999);
     req.session.profile = getProfile(`guest-${randomUUID()}`, { name: `NightOwl${suffix}`, avatar: null, chips: 2500, xp: 210 });
     req.session.authenticated = false;
+  } else {
+    const current = req.session.profile;
+    req.session.profile = getProfile(current.id, {
+      name: current.name,
+      avatar: current.avatar,
+      chips: current.chips,
+      xp: current.xp,
+    });
   }
   return req.session.profile;
 }
@@ -157,15 +170,17 @@ io.on('connection', (socket) => {
     if (addChat(room, player, String(message))) broadcast();
   });
   socket.on('disconnect', () => {
-    disconnectPlayer(room, player.id);
+    const departing = disconnectPlayer(room, player.id);
+    if (departing) saveProfile({ id: departing.id, name: departing.name, avatar: departing.avatar, chips: departing.chips, xp: departing.xp });
     saveHumans();
     broadcast();
+    advanceDealer();
   });
 });
 
 if (isProduction) {
   app.use(express.static(join(process.cwd(), 'dist')));
-  app.get('*', (_req, res) => res.sendFile(join(process.cwd(), 'dist', 'index.html')));
+  app.get('/{*splat}', (_req, res) => res.sendFile(join(process.cwd(), 'dist', 'index.html')));
 }
 
 server.listen(port, () => console.log(`Afterdark server listening on http://localhost:${port}`));
